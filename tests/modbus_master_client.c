@@ -21,7 +21,8 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <modbus.h>
-
+#include <pthread.h>
+#include <unistd.h>
 #include "unit-test.h"
 
 enum {
@@ -30,256 +31,825 @@ enum {
     RTU
 };
 
-int main(int argc, char *argv[])
+#define VV_DEBUG         
+#define VV_PRINTF(x)                         printf x
+#define VV_LOG_TRACE()                    printf("%s %d\r\n", __func__, __LINE__)          
+
+#define VV_ERR_NONE                        0
+#define VV_ERR_NULL_PTR                 -10000
+#define VV_ERR_ELEMENT_INACTIVE  -10001
+
+#define MAX_MODBUS_ELEMENT_CNT     64
+
+#define TCP_MODBUS_DEFAULT_PORT_NO    502
+#define TCP_MODBUS_DEFAULT_DEV_NO      0XFF
+
+unsigned int modbusTermCnt = 1;
+
+typedef enum {
+    TcpModbusDevStaInactive = 0,
+    TcpModbusDevStaInit = 1,
+    TcpModbusDevStaActive = 2,
+    TcpModbusDevStaConnected = 3,
+    TcpModbusDevStaEnd
+} TcpModbusDevSta_e; 
+
+typedef struct tcp_modbus_dev_cfg_s {
+    TcpModbusDevSta_e state;
+    char ipAddr[24];
+    unsigned portNum;
+    unsigned devNum;
+    unsigned char pData[16];
+    modbus_t *pCtx;
+    
+    int (*walk_state_machine) (struct tcp_modbus_dev_cfg_s *cfg);
+    int (*connect_to_remote) (struct tcp_modbus_dev_cfg_s *cfg);
+    int (*get_remote_state) (struct tcp_modbus_dev_cfg_s *cfg);
+    int (*set_remote_state) (struct tcp_modbus_dev_cfg_s *cfg);    
+} tcp_modbus_dev_cfg_t;
+
+typedef enum modbus_dev_reg_grp_s {
+    ModbusDevRegGrg_DiInputSignal, 
+    ModbusDevRegGrg_DoOutputValue, 
+    ModbusDevRegGrg_PowerOnDigitalOutPutValue,
+    ModbusDevRegGrg_CommunicationFailSafeValue,
+    ModbusDevRegGrg_AuxiliaryMemoryMFlag,
+
+    ModbusDevRegGrg_CurrentInputValue_0,
+    ModbusDevRegGrg_CurrentInputValue_1,
+    ModbusDevRegGrg_CurrentInputValue_2,
+    ModbusDevRegGrg_CurrentInputValue_3,
+    ModbusDevRegGrg_CommunicationFailSafeTimeSettingValue,
+    ModbusDevRegGrg_AllDIValue,
+    ModbusDevRegGrg_ModuleName_1,
+    ModbusDevRegGrg_ModuleName_2,
+    ModbusDevRegGrg_Version_1,
+    ModbusDevRegGrg_Version_2,
+    ModbusDevRegGrg_MacSerialNumber,
+    ModbusDevRegGrg_ModuleIDInNormalMode,
+    ModbusDevRegGrg_ProtocolInNormalMode,
+    ModbusDevRegGrg_BaudRateInNormalMode,
+    ModbusDevRegGrg_ParityOptionInNormalMode,
+    ModbusDevRegGrg_StopBitsInNormalMode,
+    ModbusDevRegGrg_TimeOutSettingInNormalMode,
+    ModbusDevRegGrg_CurrentInputValue_1_32f,
+    ModbusDevRegGrg_CurrentInputValue_2_32f,
+    ModbusDevRegGrg_CurrentInputValue_3_32f,
+    ModbusDevRegGrg_CurrentInputValue_4_32f,
+    ModbusDevRegGrg_AnalogAuxiliaryMemoryAMFlag,
+    ModbusDevRegGrg_WIFI_Mode,
+    ModbusDevRegGrg_WIFI_Encryption_WPA2,
+    ModbusDevRegGrg_WIFI_SSID,
+    ModbusDevRegGrg_WIFI_Password,
+    ModbusDevRegGrg_WIFI_Channel,
+    ModbusDevRegGrg_WIFI_IP,
+    ModbusDevRegGrg_WIFI_MASK,
+    ModbusDevRegGrg_WIFI_MODBUS_ID,
+    ModbusDevRegGrg_WIFI_LOCAL_PORT,
+    ModbusDevRegGrg_WIFI_REMOTE_PORT,
+    ModbusDevRegGrg_WIFI_DHCP_Enable,
+    ModbusDevRegGrg_WIFI_PROTOCAL,
+    ModbusDevRegGrg_WIFI_TX_POWER,
+    ModbusDevRegGrg_MAC_ADDRESS,
+    ModbusDevRegGrg_count,
+
+} modbus_dev_reg_grp_e;
+
+
+typedef struct modbus_dev_reg_attr_s {
+
+    unsigned int regAddr;
+
+    
+
+} modbus_dev_reg_attr_t;
+
+
+tcp_modbus_dev_cfg_t gModbusDevCfg[MAX_MODBUS_ELEMENT_CNT];
+
+
+int tcp_modbus_connect_to_remote(struct tcp_modbus_dev_cfg_s *cfg) 
+
 {
-    uint8_t *tab_rp_bits;
-    uint16_t *tab_rp_registers;
-    uint16_t *tab_rp_registers_bad;
-    modbus_t *ctx;
+
+    int ret = VV_ERR_NONE;
+
+
+    if (NULL == cfg)
+
+        return VV_ERR_NULL_PTR;
+
+
+    if (cfg->state == TcpModbusDevStaActive)  {
+
+        cfg->pCtx = modbus_new_tcp(cfg->ipAddr, cfg->portNum);   
+
+        if (NULL != cfg->pCtx) {
+
+            modbus_set_slave(cfg->pCtx, cfg->portNum);  
+
+            cfg->state = TcpModbusDevStaConnected;
+
+        } 
+
+    } else {
+
+        VV_PRINTF(("This device is actvie yet, Plese deactive it and then active\r\n"));
+
+    }
+
+    return ret;
+
+}
+
+
+int tcp_modbus_walk_state_machine(struct tcp_modbus_dev_cfg_s *cfg) 
+
+{
+
+    int ret = VV_ERR_NONE;
+
+    
+
+    if (NULL == cfg) 
+
+        return VV_ERR_NULL_PTR;
+
+
+    if (cfg->state == TcpModbusDevStaActive) 
+
+        ret += cfg->get_remote_state(cfg);
+
+
+    if (cfg->state != TcpModbusDevStaConnected)
+
+        return ret;
+
+
+    if (cfg->get_remote_state != NULL)
+
+        ret += cfg->get_remote_state(cfg);
+
+
+    if (cfg->set_remote_state != NULL)
+
+        ret += cfg->set_remote_state(cfg);
+
+
+    return ret;
+
+}
+
+
+int tcp_modbus_get_remote_state(struct tcp_modbus_dev_cfg_s *cfg) 
+
+{
+
+    int ret = 0;
+
+#ifdef VV_DEBUG
+
+    VV_LOG_TRACE();
+
+    VV_PRINTF(("%s %d %d\r\n", cfg->ipAddr, cfg->portNum, cfg->state));
+
+#endif
+
+    return ret;
+
+}
+
+
+int tcp_modbus_set_remote_state (struct tcp_modbus_dev_cfg_s *cfg) 
+
+{
+
+    int ret = VV_ERR_NONE;
+
+#ifdef VV_DEBUG
+
+    VV_LOG_TRACE();
+
+#endif
+
+    return ret;
+
+}
+
+
+void tcp_modbus_cfg_thread(void *pData) 
+
+{
+
     int i;
+
+    tcp_modbus_dev_cfg_t *pInst;
+
+    unsigned int devCnt = ((unsigned int *)pData)[0];  
+
+
+    i = 0;
+
+    
+
+    while (1) {
+
+        i = i%devCnt;
+
+        pInst = &gModbusDevCfg[i]; 
+
+
+        if (pInst->walk_state_machine != NULL) 
+
+            pInst->walk_state_machine(pInst);
+
+        
+
+        usleep(1);
+
+        i++;
+
+    }
+
+}
+
+
+int tcp_modbus_cfg_reset_to_default (tcp_modbus_dev_cfg_t *cfg) 
+
+{
+
+    if (NULL == cfg)
+
+        return VV_ERR_NULL_PTR;
+
+
+    memset(cfg, 0x0, sizeof(tcp_modbus_dev_cfg_t)); 
+
+
+    cfg->pCtx = NULL;
+
+    
+
+    cfg->state = TcpModbusDevStaInactive;
+
+    cfg->portNum = TCP_MODBUS_DEFAULT_PORT_NO;
+
+    cfg->devNum = TCP_MODBUS_DEFAULT_DEV_NO;
+
+
+    cfg->connect_to_remote = tcp_modbus_connect_to_remote;
+
+    cfg->walk_state_machine = tcp_modbus_walk_state_machine;
+
+    cfg->get_remote_state = tcp_modbus_get_remote_state;
+
+    cfg->set_remote_state = tcp_modbus_get_remote_state;
+
+
+    cfg->state = TcpModbusDevStaInit;
+
+
+    return VV_ERR_NONE;
+
+        
+
+}
+
+
+int tcp_modbus_cfg_test_init(void) 
+
+{
+
+    // we set to two by test
+
+    modbusTermCnt = 1;
+
+
+    gModbusDevCfg[0].devNum = 1;
+
+    gModbusDevCfg[0].portNum = 502;
+
+    strcpy(gModbusDevCfg[0].ipAddr, "192.168.1.201");
+
+
+    gModbusDevCfg[1].devNum = 2;
+
+    gModbusDevCfg[1].portNum = 202;
+
+    strcpy(gModbusDevCfg[0].ipAddr, "192.168.1.202");
+
+
+    modbusTermCnt = 0;
+
+
+    return VV_ERR_NONE;
+
+}
+
+
+int tcp_modbus_cfg_init(void) 
+
+{
+
+    int i;
+
+
+    for (i = 0; i < MAX_MODBUS_ELEMENT_CNT; i++) {
+
+        tcp_modbus_cfg_reset_to_default(&gModbusDevCfg[i]);   
+
+    }
+
+
+    /*
+
+     * Load cfg from config files
+
+     */
+
+
+    tcp_modbus_cfg_test_init();
+
+
+    return VV_ERR_NONE;
+
+}
+
+
+int main(int argc, char *argv[])
+
+{
+
+    uint8_t *tab_rp_bits;
+
+    uint16_t *tab_rp_registers;
+
+    uint16_t *tab_rp_registers_bad;
+
+    modbus_t *ctx;
+
+    int i;
+
     uint8_t value;
+
     int nb_points;
+
     int rc;
+
     float real;
+
     uint32_t ireal;
+
     struct timeval old_response_timeout;
+
     struct timeval response_timeout;
+
     int use_backend;
 
+
     if (argc > 1) {
+
         if (strcmp(argv[1], "tcp") == 0) {
+
             use_backend = TCP;
+
 	} else if (strcmp(argv[1], "tcppi") == 0) {
+
             use_backend = TCP_PI;
+
         } else if (strcmp(argv[1], "rtu") == 0) {
+
             use_backend = RTU;
+
         } else {
+
             printf("Usage:\n  %s [tcp|tcppi|rtu] - Modbus client for unit testing\n\n", argv[0]);
+
             exit(1);
+
         }
+
     } else {
+
         /* By default */
+
         use_backend = TCP;
+
     }
+
 
     if (use_backend == TCP) {
-        ctx = modbus_new_tcp("192.168.1.201", 502);
+
+        ctx = modbus_new_tcp("192.168.1.202", 202);
+
+        modbus_set_slave(ctx, 2);
+
     } else if (use_backend == TCP_PI) {
+
         ctx = modbus_new_tcp_pi("::1", "1502");
+
     } else {
+
         ctx = modbus_new_rtu("/dev/ttyUSB1", 115200, 'N', 8, 1);
+
     }
+
     if (ctx == NULL) {
+
         fprintf(stderr, "Unable to allocate libmodbus context\n");
+
         return -1;
+
     }
+
     modbus_set_debug(ctx, TRUE);
+
     modbus_set_error_recovery(ctx,
+
                               MODBUS_ERROR_RECOVERY_LINK |
+
                               MODBUS_ERROR_RECOVERY_PROTOCOL);
 
+
     if (use_backend == RTU) {
+
           modbus_set_slave(ctx, SERVER_ID);
+
     }
+
 
     if (modbus_connect(ctx) == -1) {
+
         fprintf(stderr, "Connection failed: %s\n",
+
                 modbus_strerror(errno));
+
         modbus_free(ctx);
+
         return -1;
+
     }
 
+
     /* Allocate and initialize the memory to store the bits */
+
     nb_points = (UT_BITS_NB > UT_INPUT_BITS_NB) ? UT_BITS_NB : UT_INPUT_BITS_NB;
+
     tab_rp_bits = (uint8_t *) malloc(nb_points * sizeof(uint8_t));
+
     memset(tab_rp_bits, 0, nb_points * sizeof(uint8_t));
 
+
     /* Allocate and initialize the memory to store the registers */
+
     nb_points = (UT_REGISTERS_NB > UT_INPUT_REGISTERS_NB) ?
+
         UT_REGISTERS_NB : UT_INPUT_REGISTERS_NB;
+
     tab_rp_registers = (uint16_t *) malloc(nb_points * sizeof(uint16_t));
+
     memset(tab_rp_registers, 0, nb_points * sizeof(uint16_t));
+
 
     printf("** UNIT TESTING **\n");
 
+
     printf("\nTEST WRITE/READ:\n");
+
 
     /** COIL BITS **/
 
+
     /* Single */
-    rc = modbus_write_bit(ctx, UT_BITS_ADDRESS, ON);
-    printf("1/2 modbus_write_bit: ");
-    if (rc == 1) {
-        printf("OK\n");
-    } else {
-        printf("FAILED\n");
-        goto close;
+
+    while (1) {
+
+        rc = modbus_write_bit(ctx, UT_BITS_ADDRESS, ON);
+
+        printf("1/2 modbus_write_bit: ");
+
+        if (rc == 1) {
+
+            printf("OK\n");
+
+        } else {
+
+            printf("FAILED\n");
+
+            goto close;
+
+        }
+
+
+        rc = modbus_read_bits(ctx, UT_BITS_ADDRESS, 1, tab_rp_bits);
+
+        printf("2/2 modbus_read_bits: ");
+
+        if (rc != 1) {
+
+            printf("FAILED (nb points %d)\n", rc);
+
+            goto close;
+
+        }
+
     }
 
-    rc = modbus_read_bits(ctx, UT_BITS_ADDRESS, 1, tab_rp_bits);
-    printf("2/2 modbus_read_bits: ");
-    if (rc != 1) {
-        printf("FAILED (nb points %d)\n", rc);
-        goto close;
-    }
+    
 
     if (tab_rp_bits[0] != ON) {
+
         printf("FAILED (%0X = != %0X)\n", tab_rp_bits[0], ON);
+
         goto close;
+
     }
+
     printf("OK\n");
+
     /* End single */
 
+
     /* Multiple bits */
+
     {
+
         uint8_t tab_value[UT_BITS_NB];
 
+
         modbus_set_bits_from_bytes(tab_value, 0, UT_BITS_NB, UT_BITS_TAB);
+
         rc = modbus_write_bits(ctx, UT_BITS_ADDRESS,
+
                                UT_BITS_NB, tab_value);
+
         printf("1/2 modbus_write_bits: ");
+
         if (rc == UT_BITS_NB) {
+
             printf("OK\n");
+
         } else {
+
             printf("FAILED\n");
+
             goto close;
+
         }
+
     }
+
 
     rc = modbus_read_bits(ctx, UT_BITS_ADDRESS, UT_BITS_NB, tab_rp_bits);
+
     printf("2/2 modbus_read_bits: ");
+
     if (rc != UT_BITS_NB) {
+
         printf("FAILED (nb points %d)\n", rc);
+
         goto close;
+
     }
+
 
     i = 0;
+
     nb_points = UT_BITS_NB;
+
     while (nb_points > 0) {
+
         int nb_bits = (nb_points > 8) ? 8 : nb_points;
 
+
         value = modbus_get_byte_from_bits(tab_rp_bits, i*8, nb_bits);
+
         if (value != UT_BITS_TAB[i]) {
+
             printf("FAILED (%0X != %0X)\n", value, UT_BITS_TAB[i]);
+
             goto close;
+
         }
 
+
         nb_points -= nb_bits;
+
         i++;
+
     }
+
     printf("OK\n");
+
     /* End of multiple bits */
 
+
     /** DISCRETE INPUTS **/
+
     rc = modbus_read_input_bits(ctx, UT_INPUT_BITS_ADDRESS,
+
                                 UT_INPUT_BITS_NB, tab_rp_bits);
+
     printf("1/1 modbus_read_input_bits: ");
 
+
     if (rc != UT_INPUT_BITS_NB) {
+
         printf("FAILED (nb points %d)\n", rc);
+
         goto close;
+
     }
+
 
     i = 0;
+
     nb_points = UT_INPUT_BITS_NB;
+
     while (nb_points > 0) {
+
         int nb_bits = (nb_points > 8) ? 8 : nb_points;
 
+
         value = modbus_get_byte_from_bits(tab_rp_bits, i*8, nb_bits);
+
         if (value != UT_INPUT_BITS_TAB[i]) {
+
             printf("FAILED (%0X != %0X)\n", value, UT_INPUT_BITS_TAB[i]);
+
             goto close;
+
         }
 
+
         nb_points -= nb_bits;
+
         i++;
+
     }
+
     printf("OK\n");
+
 
     /** HOLDING REGISTERS **/
 
+
     /* Single register */
+
     rc = modbus_write_register(ctx, UT_REGISTERS_ADDRESS, 0x1234);
+
     printf("1/2 modbus_write_register: ");
+
     if (rc == 1) {
+
         printf("OK\n");
+
     } else {
+
         printf("FAILED\n");
+
         goto close;
+
     }
 
+
     rc = modbus_read_registers(ctx, UT_REGISTERS_ADDRESS,
+
                                1, tab_rp_registers);
+
     printf("2/2 modbus_read_registers: ");
+
     if (rc != 1) {
+
         printf("FAILED (nb points %d)\n", rc);
+
         goto close;
+
     }
+
 
     if (tab_rp_registers[0] != 0x1234) {
+
         printf("FAILED (%0X != %0X)\n",
+
                tab_rp_registers[0], 0x1234);
+
         goto close;
+
     }
+
     printf("OK\n");
+
     /* End of single register */
 
+
     /* Many registers */
+
     rc = modbus_write_registers(ctx, UT_REGISTERS_ADDRESS,
+
                                 UT_REGISTERS_NB, UT_REGISTERS_TAB);
+
     printf("1/5 modbus_write_registers: ");
+
     if (rc == UT_REGISTERS_NB) {
+
         printf("OK\n");
+
     } else {
+
         printf("FAILED\n");
+
         goto close;
+
     }
 
+
     rc = modbus_read_registers(ctx, UT_REGISTERS_ADDRESS,
+
                                UT_REGISTERS_NB, tab_rp_registers);
+
     printf("2/5 modbus_read_registers: ");
+
     if (rc != UT_REGISTERS_NB) {
+
         printf("FAILED (nb points %d)\n", rc);
+
         goto close;
+
     }
+
 
     for (i=0; i < UT_REGISTERS_NB; i++) {
+
         if (tab_rp_registers[i] != UT_REGISTERS_TAB[i]) {
+
             printf("FAILED (%0X != %0X)\n",
+
                    tab_rp_registers[i],
+
                    UT_REGISTERS_TAB[i]);
+
             goto close;
+
         }
+
     }
+
     printf("OK\n");
+
 
     rc = modbus_read_registers(ctx, UT_REGISTERS_ADDRESS,
+
                                0, tab_rp_registers);
+
     printf("3/5 modbus_read_registers (0): ");
+
     if (rc != -1 && errno == EMBMDATA) {
+
         printf("FAILED (nb points %d)\n", rc);
+
         goto close;
+
     }
+
     printf("OK\n");
 
+
     nb_points = (UT_REGISTERS_NB >
+
                  UT_INPUT_REGISTERS_NB) ?
+
         UT_REGISTERS_NB : UT_INPUT_REGISTERS_NB;
+
     memset(tab_rp_registers, 0, nb_points * sizeof(uint16_t));
 
+
     /* Write registers to zero from tab_rp_registers and store read registers
+
        into tab_rp_registers. So the read registers must set to 0, except the
+
        first one because there is an offset of 1 register on write. */
+
     rc = modbus_write_and_read_registers(ctx,
+
                                          UT_REGISTERS_ADDRESS + 1, UT_REGISTERS_NB - 1,
+
                                          tab_rp_registers,
+
                                          UT_REGISTERS_ADDRESS,
+
                                          UT_REGISTERS_NB,
+
                                          tab_rp_registers);
+
     printf("4/5 modbus_write_and_read_registers: ");
+
     if (rc != UT_REGISTERS_NB) {
+
         printf("FAILED (nb points %d != %d)\n", rc, UT_REGISTERS_NB);
+
         goto close;
+
     }
 
     if (tab_rp_registers[0] != UT_REGISTERS_TAB[0]) {
