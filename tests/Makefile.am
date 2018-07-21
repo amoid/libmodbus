@@ -8,7 +8,8 @@ noinst_PROGRAMS = \
 	random-test-client \
 	unit-test-server \
 	unit-test-client \
-	version
+	version \
+        modbus_master_serv.c 
 
 common_ldflags = \
 	$(top_builddir)/src/libmodbus.la
@@ -36,6 +37,9 @@ unit_test_client_LDADD = $(common_ldflags)
 
 version_SOURCES = version.c
 version_LDADD = $(common_ldflags)
+
+modbus_master_serv_SOURCES = modbus_master_serv.c
+modbus_master_serv_LDADD = $(common_ldflags)
 
 AM_CPPFLAGS = -I$(top_srcdir) -I$(top_srcdir)/src
 CLEANFILES = *~
