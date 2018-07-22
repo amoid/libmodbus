@@ -31,16 +31,18 @@ enum {
     RTU
 };
 
-//#define VV_DEBUG    
+#define VV_DEBUG    
 
 #ifdef VV_DEBUG
 #define VV_PRINTF(x)                         printf x
 #define VV_LOG_TRACE()                    printf("%s %d\r\n", __func__, __LINE__) 
 #define VV_VERBOSE_LOG_TRACE()    printf("%s %d\r\n", __func__, __LINE__)   
+#define VV_ERR_MSG(x)                   printf x
 #else
 #define VV_PRINTF(x)                        
 #define VV_LOG_TRACE()                    
 #define VV_VERBOSE_LOG_TRACE()    
+#define VV_ERR_MSG(x)                   printf x
 #endif
 
 #define VV_E_NONE                        0
@@ -298,6 +300,7 @@ int tcp_modbus_get_remote_state(struct tcp_modbus_dev_cfg_s *cfg)
    }
 
    if (ret == VV_OS_NORMALL) {
+        VV_ERR_MSG(("Connection: %s:%d.devNum:%d timeout!!!!\r\n", cfg->ipAddr, cfg->portNum, cfg->devNum));
         cfg->state_reset(cfg, TcpModbusDevStaTimeout);
    }
    return ret;
@@ -407,7 +410,7 @@ int tcp_modbus_cfg_reset_to_default (tcp_modbus_dev_cfg_t *cfg)
 int tcp_modbus_cfg_test_init(void) 
 
 {
-#if 0
+#if 1
    // we set to two by test
    modbusTermCnt = 1;
    gModbusDevCfg[0].devNum = 1;
