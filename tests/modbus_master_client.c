@@ -30,12 +30,21 @@ enum {
     TCP_PI,
     RTU
 };
-#define VV_DEBUG         
+
+//#define VV_DEBUG    
+
+#ifdef VV_DEBUG
 #define VV_PRINTF(x)                         printf x
 #define VV_LOG_TRACE()                    printf("%s %d\r\n", __func__, __LINE__) 
 #define VV_VERBOSE_LOG_TRACE()    printf("%s %d\r\n", __func__, __LINE__)   
+#else
+#define VV_PRINTF(x)                        
+#define VV_LOG_TRACE()                    
+#define VV_VERBOSE_LOG_TRACE()    
+#endif
 
 #define VV_E_NONE                        0
+#define VV_OS_NORMALL               -1
 #define VV_E_NULL_PTR                 -10000
 
 #define MAX_MODBUS_ELEMENT_CNT     64
@@ -50,6 +59,7 @@ typedef enum {
    TcpModbusDevStaInit = 1,
    TcpModbusDevStaActive = 2,
    TcpModbusDevStaConnected = 3,
+   TcpModbusDevStaTimeout = 4,
    TcpModbusDevStaEnd
 } TcpModbusDevSta_e; 
 
@@ -60,6 +70,8 @@ typedef struct tcp_modbus_dev_cfg_s {
    unsigned devNum;
    unsigned char pData[16];
    modbus_t *pCtx;
+
+   int (*state_reset)(struct tcp_modbus_dev_cfg_s *cfg, TcpModbusDevSta_e sta);
 
    int (*check_connection_and_keepalive)(struct tcp_modbus_dev_cfg_s *cfg);
    int (*walk_state_machine) (struct tcp_modbus_dev_cfg_s *cfg);
@@ -181,6 +193,14 @@ modbus_dev_reg_attr_t gModbusDevRegAttrTbl[] = {
 
 tcp_modbus_dev_cfg_t gModbusDevCfg[MAX_MODBUS_ELEMENT_CNT];
 
+int tcp_modbus_state_reset(struct tcp_modbus_dev_cfg_s *cfg, TcpModbusDevSta_e sta) 
+{
+    if (NULL != cfg && NULL != cfg->state_reset)
+        cfg->state = sta;
+
+    return VV_E_NONE;
+}
+
 int tcp_modbus_check_connection_and_keepalive(struct tcp_modbus_dev_cfg_s *cfg) 
 {
    int ret = VV_E_NONE;
@@ -191,7 +211,8 @@ int tcp_modbus_check_connection_and_keepalive(struct tcp_modbus_dev_cfg_s *cfg)
 
    VV_VERBOSE_LOG_TRACE();
    
-   if (cfg->state == TcpModbusDevStaActive)  {
+   if (cfg->state == TcpModbusDevStaActive 
+       || cfg->state == TcpModbusDevStaTimeout)  {
        VV_VERBOSE_LOG_TRACE();
        if (cfg->connect_to_remote) 
             ret = cfg->connect_to_remote(cfg);
@@ -211,12 +232,13 @@ int tcp_modbus_connect_to_remote(struct tcp_modbus_dev_cfg_s *cfg)
        return VV_E_NULL_PTR;
 
    VV_VERBOSE_LOG_TRACE();
-   if (cfg->state == TcpModbusDevStaActive)  {
+   if (cfg->state == TcpModbusDevStaActive
+       || cfg->state == TcpModbusDevStaTimeout)  {
        cfg->pCtx = modbus_new_tcp(cfg->ipAddr, cfg->portNum);   
        VV_VERBOSE_LOG_TRACE();
        if (NULL != cfg->pCtx) {
            VV_VERBOSE_LOG_TRACE();
-           modbus_set_slave(cfg->pCtx, cfg->portNum);  
+           modbus_set_slave(cfg->pCtx, cfg->devNum);  
            ret = modbus_connect(cfg->pCtx);
            if (VV_E_NONE != ret) {
                 return ret;
@@ -235,15 +257,20 @@ int tcp_modbus_walk_state_machine(struct tcp_modbus_dev_cfg_s *cfg)
 {
    int ret = VV_E_NONE;
 
+   VV_LOG_TRACE();
    if (NULL == cfg) 
        return VV_E_NULL_PTR;
-   
+
+   VV_LOG_TRACE();
    if (cfg->state != TcpModbusDevStaConnected)
        return ret;
 
+   VV_LOG_TRACE();
+
+/*
    if (cfg->get_remote_state != NULL)
        ret += cfg->get_remote_state(cfg);
-
+*/
    if (cfg->set_remote_state != NULL)
        ret += cfg->set_remote_state(cfg);
 
@@ -254,6 +281,8 @@ int tcp_modbus_walk_state_machine(struct tcp_modbus_dev_cfg_s *cfg)
 int tcp_modbus_get_remote_state(struct tcp_modbus_dev_cfg_s *cfg) 
 
 {
+   int retry_cnt = 10;
+   
    uint8_t tab_rp_bits[20] = {0};
    int ret = 0;
 #ifdef VV_DEBUG
@@ -261,18 +290,38 @@ int tcp_modbus_get_remote_state(struct tcp_modbus_dev_cfg_s *cfg)
    VV_PRINTF(("%s %d %d\r\n", cfg->ipAddr, cfg->portNum, cfg->state));
 #endif
 
-   ret = modbus_read_bits(cfg->pCtx, 17, 1, tab_rp_bits);
+   while (retry_cnt--) {
+       ret = modbus_read_bits(cfg->pCtx, 17, 1, tab_rp_bits);
+       if (ret != VV_OS_NORMALL) {
+            return ret; 
+       }
+   }
 
+   if (ret == VV_OS_NORMALL) {
+        cfg->state_reset(cfg, TcpModbusDevStaTimeout);
+   }
    return ret;
 }
 
 int tcp_modbus_set_remote_state (struct tcp_modbus_dev_cfg_s *cfg) 
 {
+   int retry_cnt = 10;
    int ret = VV_E_NONE;
 #ifdef VV_DEBUG
    VV_LOG_TRACE();
 #endif
-   ret = modbus_write_bit(cfg->pCtx, 17, ON);
+   VV_LOG_TRACE();
+
+   while (retry_cnt--) {
+       ret = modbus_write_bit(cfg->pCtx, 17, ON);
+       if (ret != VV_OS_NORMALL) {
+            return ret; 
+       }
+   }
+
+   if (ret == VV_OS_NORMALL) {
+        cfg->state_reset(cfg, TcpModbusDevStaTimeout);
+    }
 
    return ret;
 }
@@ -288,10 +337,11 @@ void *tcp_modbus_cfg_thread(void *pData)
    while (1) {
        //VV_LOG_TRACE(); 
        i = i%devCnt;
+        VV_LOG_TRACE(); 
        pInst = &gModbusDevCfg[i]; 
        if (pInst->walk_state_machine != NULL) 
            pInst->walk_state_machine(pInst);   
-       usleep(1000000);
+       usleep(1000);
        i++;
    }
 }
@@ -305,14 +355,15 @@ void *tcp_modbus_kick_off_keepalive_thread(void *arg)
 
    VV_LOG_TRACE(); 
    // Connect to all remote device at first time
-   
+
    for (i = 0; i < devCnt; i++) {
        VV_LOG_TRACE(); 
        pInst = &gModbusDevCfg[i];
        if (pInst->check_connection_and_keepalive != NULL)  {
-           VV_VERBOSE_LOG_TRACE();
+           VV_LOG_TRACE(); 
            pInst->check_connection_and_keepalive(pInst); 
        }
+       VV_PRINTF(("modbusTermCnt = %d %d \r\n", modbusTermCnt, pInst->check_connection_and_keepalive == NULL));
        VV_VERBOSE_LOG_TRACE();
    }
    VV_LOG_TRACE(); 
@@ -341,6 +392,8 @@ int tcp_modbus_cfg_reset_to_default (tcp_modbus_dev_cfg_t *cfg)
    cfg->state = TcpModbusDevStaInactive;
    cfg->portNum = TCP_MODBUS_DEFAULT_PORT_NO;
    cfg->devNum = TCP_MODBUS_DEFAULT_DEV_NO;
+
+   cfg->state_reset = tcp_modbus_state_reset;
    cfg->check_connection_and_keepalive = tcp_modbus_check_connection_and_keepalive;
    cfg->connect_to_remote = tcp_modbus_connect_to_remote;
    cfg->walk_state_machine = tcp_modbus_walk_state_machine;
@@ -354,6 +407,7 @@ int tcp_modbus_cfg_reset_to_default (tcp_modbus_dev_cfg_t *cfg)
 int tcp_modbus_cfg_test_init(void) 
 
 {
+#if 0
    // we set to two by test
    modbusTermCnt = 1;
    gModbusDevCfg[0].devNum = 1;
@@ -363,6 +417,12 @@ int tcp_modbus_cfg_test_init(void)
    gModbusDevCfg[1].portNum = 202;
    strcpy(gModbusDevCfg[1].ipAddr, "192.168.1.202");
    modbusTermCnt = 2;
+#else
+   modbusTermCnt = 1;
+   gModbusDevCfg[0].devNum = 2;
+   gModbusDevCfg[0].portNum = 202;
+   strcpy(gModbusDevCfg[0].ipAddr, "192.168.1.202");
+#endif   
    return VV_E_NONE;
 }
 
@@ -432,7 +492,7 @@ int main (int argc, char *argv[])
     return VV_E_NONE;
 }
 
-int main_org(int argc, char *argv[])
+int main_new(int argc, char *argv[])
 {
     uint8_t *tab_rp_bits;
     uint16_t *tab_rp_registers;
@@ -519,14 +579,14 @@ int main_org(int argc, char *argv[])
         printf("FAILED\n");
         goto close;
     }
-
+    }
     rc = modbus_read_bits(ctx, 17, 1, tab_rp_bits);
     printf("2/2 modbus_read_bits: ");
     if (rc != 1) {
         printf("FAILED (nb points %d)\n", rc);
         goto close;
     }
-    }
+    
     if (tab_rp_bits[0] != ON) {
         printf("FAILED (%0X = != %0X)\n", tab_rp_bits[0], ON);
         goto close;
